@@ -26,7 +26,8 @@ MasterService::MasterService(const MasterServiceConfig& config)
       root_fs_dir_(config.root_fs_dir),
       segment_manager_(config.memory_allocator),
       memory_allocator_type_(config.memory_allocator),
-      allocation_strategy_(std::make_shared<RandomAllocationStrategy>()) {
+      allocation_strategy_(std::make_shared<RandomAllocationStrategy>()),
+      enable_kv_event_publish_(config.enable_kv_event_publish) {
     if (eviction_ratio_ < 0.0 || eviction_ratio_ > 1.0) {
         LOG(ERROR) << "Eviction ratio must be between 0.0 and 1.0, "
                    << "current value: " << eviction_ratio_;
@@ -53,6 +54,11 @@ MasterService::MasterService(const MasterServiceConfig& config)
     if (!root_fs_dir_.empty()) {
         use_disk_replica_ = true;
     }
+
+    if (enable_kv_event_publish_) {
+        publisher_ =
+            std::make_unique<KVEventSystem>(config.kv_event_publisher_config);
+    }
 }
 
 MasterService::~MasterService() {
@@ -64,6 +70,9 @@ MasterService::~MasterService() {
     }
     if (client_monitor_thread_.joinable()) {
         client_monitor_thread_.join();
+    }
+    if (publisher_) {
+        publisher_->shutdown();
     }
 }
 
@@ -153,10 +162,21 @@ void MasterService::ClearInvalidHandles() {
         MutexLocker lock(&shard.mutex);
         auto it = shard.metadata.begin();
         while (it != shard.metadata.end()) {
+            size_t replica_count_before =
+                publisher_ ? it->second.CountReplicas() : 0;
             if (CleanupStaleHandles(it->second)) {
                 // If the object is empty, we need to erase the iterator
+                if (publisher_) {
+                    publisher_->publish<BlockUpdateEvent>(
+                        it->first, std::vector<Replica::Descriptor>{});
+                }
                 it = shard.metadata.erase(it);
             } else {
+                if (publisher_ &&
+                    replica_count_before != it->second.CountReplicas()) {
+                    publisher_->publish<BlockUpdateEvent>(
+                        it->first, it->second.GetReplicasDescriptorList());
+                }
                 ++it;
             }
         }
@@ -442,6 +462,12 @@ auto MasterService::PutEnd(const std::string& key, ReplicaType replica_type)
     // at beginning. 2. If this object has soft pin enabled, set it to be soft
     // pinned.
     metadata.GrantLease(0, default_kv_soft_pin_ttl_);
+
+    if (publisher_) {
+        publisher_->publish<BlockUpdateEvent>(
+            key, metadata.GetReplicasDescriptorList());
+    }
+
     return {};
 }
 
@@ -509,6 +535,12 @@ auto MasterService::Remove(const std::string& key)
 
     // Remove object metadata
     accessor.Erase();
+
+    if (publisher_) {
+        publisher_->publish<BlockUpdateEvent>(
+            key, std::vector<Replica::Descriptor>{});
+    }
+
     return {};
 }
 
@@ -548,6 +580,10 @@ auto MasterService::RemoveByRegex(const std::string& regex_pattern)
 
                 VLOG(1) << "key=" << it->first
                         << " matched by regex. Removing.";
+                if (publisher_) {
+                    publisher_->publish<BlockUpdateEvent>(
+                        it->first, std::vector<Replica::Descriptor>{});
+                }
                 it = metadata_shards_[i].metadata.erase(it);
                 removed_count++;
             } else {
@@ -580,6 +616,10 @@ long MasterService::RemoveAll() {
             if (it->second.IsLeaseExpired(now)) {
                 total_freed_size +=
                     it->second.size * it->second.GetMemReplicaCount();
+                if (publisher_) {
+                    publisher_->publish<BlockUpdateEvent>(
+                        it->first, std::vector<Replica::Descriptor>{});
+                }
                 it = shard.metadata.erase(it);
                 removed_count++;
             } else {
@@ -620,6 +660,18 @@ size_t MasterService::GetKeyCount() const {
         total += shard.metadata.size();
     }
     return total;
+}
+
+auto MasterService::GetPublisherStats() const
+    -> tl::expected<KVEventSystem::Stats, ErrorCode> {
+    if (!enable_kv_event_publish_ || !publisher_) {
+        return tl::make_unexpected(ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS);
+    }
+    try {
+        return publisher_->get_stats();
+    } catch (const std::exception& e) {
+        return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
+    }
 }
 
 auto MasterService::Ping(const UUID& client_id)

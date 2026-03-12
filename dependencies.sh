@@ -182,6 +182,57 @@ check_success "Failed to install yalantinglibs"
 
 print_success "yalantinglibs installed successfully"
 
+# Install ZeroMQ (libzmq)
+print_section "Installing ZeroMQ (libzmq)"
+apt-get install -y libzmq3-dev
+check_success "Failed to install libzmq3-dev"
+print_success "libzmq3-dev installed successfully"
+
+# Install cppzmq (header-only C++ binding for ZeroMQ)
+print_section "Installing cppzmq from source"
+THIRDPARTIES_DIR="${REPO_ROOT}/thirdparties"
+CPPZMQ_DIR="${THIRDPARTIES_DIR}/cppzmq"
+if [ -d "$CPPZMQ_DIR" ]; then
+    echo -e "${YELLOW}cppzmq directory already exists. Removing for fresh install...${NC}"
+    rm -rf "$CPPZMQ_DIR"
+    check_success "Failed to remove existing cppzmq directory"
+fi
+cd "${THIRDPARTIES_DIR}"
+git clone ${GITHUB_PROXY}/zeromq/cppzmq.git "$CPPZMQ_DIR"
+check_success "Failed to clone cppzmq"
+cd "$CPPZMQ_DIR"
+git checkout v4.10.0
+check_success "Failed to checkout cppzmq v4.10.0"
+mkdir -p build && cd build
+cmake .. -DCPPZMQ_BUILD_TESTS=OFF
+check_success "Failed to configure cppzmq"
+cmake --install .
+check_success "Failed to install cppzmq"
+print_success "cppzmq installed successfully"
+
+# Install msgpack-cxx
+print_section "Installing msgpack-cxx from release source (v7.0.0)"
+apt-get install -y libmsgpack-dev
+check_success "Failed to install libmsgpack-dev"
+MSGPACK_DIR="${THIRDPARTIES_DIR}/msgpack-cxx"
+if [ -d "$MSGPACK_DIR" ]; then
+    echo -e "${YELLOW}msgpack directory already exists. Removing for fresh install...${NC}"
+    rm -rf "$MSGPACK_DIR"
+    check_success "Failed to remove existing msgpack directory"
+fi
+cd "${THIRDPARTIES_DIR}"
+git clone ${GITHUB_PROXY}/msgpack/msgpack-c.git "$MSGPACK_DIR"
+check_success "Failed to clone msgpack-cxx"
+cd "$MSGPACK_DIR"
+git checkout cpp-7.0.0
+check_success "Failed to checkout msgpack-cxx cpp-7.0.0"
+mkdir -p build && cd build
+cmake .. -DMSGPACK_BUILD_TESTS=OFF -DMSGPACK_BUILD_EXAMPLES=OFF
+check_success "Failed to configure msgpack-cxx"
+cmake --install .
+check_success "Failed to install msgpack-cxx"
+print_success "msgpack-cxx installed successfully"
+
 # Initialize and update git submodules
 print_section "Initializing Git Submodules"
 
@@ -266,6 +317,8 @@ echo -e "${GREEN}All dependencies have been successfully installed!${NC}"
 echo -e "The following components were installed:"
 echo -e "  ${GREEN}✓${NC} System packages"
 echo -e "  ${GREEN}✓${NC} yalantinglibs"
+echo -e "  ${GREEN}✓${NC} ZeroMQ (libzmq + cppzmq)"
+echo -e "  ${GREEN}✓${NC} msgpack-cxx"
 echo -e "  ${GREEN}✓${NC} Git submodules"
 echo -e "  ${GREEN}✓${NC} Go $GOVER"
 echo

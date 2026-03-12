@@ -4,6 +4,7 @@
 #include <stdexcept>
 
 #include "config_helper.h"
+#include "kv_event/kv_event_publisher_config.h"
 #include "types.h"
 
 namespace mooncake {
@@ -36,6 +37,10 @@ struct MasterConfig {
     bool enable_http_metadata_server;
     uint32_t http_metadata_server_port;
     std::string http_metadata_server_host;
+
+    // KV Event Publisher
+    bool enable_kv_event_publish = false;
+    KVEventPublisherConfig kv_event_publisher_config{};
 };
 
 class MasterServiceSupervisorConfig {
@@ -163,6 +168,10 @@ class WrappedMasterServiceConfig {
     std::string root_fs_dir = DEFAULT_ROOT_FS_DIR;
     BufferAllocatorType memory_allocator = BufferAllocatorType::OFFSET;
 
+    // KV Event Publisher
+    bool enable_kv_event_publish = false;
+    KVEventPublisherConfig kv_event_publisher_config{};
+
     WrappedMasterServiceConfig() = default;
 
     // From MasterConfig
@@ -191,6 +200,9 @@ class WrappedMasterServiceConfig {
         } else {
             memory_allocator = mooncake::BufferAllocatorType::OFFSET;
         }
+
+        enable_kv_event_publish = config.enable_kv_event_publish;
+        kv_event_publisher_config = config.kv_event_publisher_config;
     }
 
     // From MasterServiceSupervisorConfig, enable_ha is set to true
@@ -318,6 +330,10 @@ class MasterServiceConfig {
     std::string root_fs_dir = DEFAULT_ROOT_FS_DIR;
     BufferAllocatorType memory_allocator = BufferAllocatorType::OFFSET;
 
+    // KV Event Publisher
+    bool enable_kv_event_publish = false;
+    KVEventPublisherConfig kv_event_publisher_config{};
+
     MasterServiceConfig() = default;
 
     // From WrappedMasterServiceConfig
@@ -334,6 +350,8 @@ class MasterServiceConfig {
         cluster_id = config.cluster_id;
         root_fs_dir = config.root_fs_dir;
         memory_allocator = config.memory_allocator;
+        enable_kv_event_publish = config.enable_kv_event_publish;
+        kv_event_publisher_config = config.kv_event_publisher_config;
     }
 
     // Static factory method to create a builder
