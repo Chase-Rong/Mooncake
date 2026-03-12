@@ -17,6 +17,7 @@
 #include <ylt/util/tl/expected.hpp>
 
 #include "allocation_strategy.h"
+#include "kv_event_publisher.h"
 #include "master_metric_manager.h"
 #include "mutex.h"
 #include "segment.h"
@@ -219,6 +220,17 @@ class MasterService {
      */
     tl::expected<std::string, ErrorCode> GetFsdir() const;
 
+    /**
+     * @brief Check if the event publisher is enabled.
+     */
+    bool IsPublisherEnabled() const { return enable_kv_event_publish_; }
+
+    /**
+     * @brief Retrieve statistics from the event publisher.
+     */
+    auto GetPublisherStats() const
+        -> tl::expected<KVEventSystem::Stats, ErrorCode>;
+
    private:
     // Resolve the key to a sanitized format for storage
     std::string SanitizeKey(const std::string& key) const;
@@ -361,6 +373,17 @@ class MasterService {
                     return replica.status() == ReplicaStatus::COMPLETE;
                 });
         }
+
+        size_t CountReplicas() const { return replicas.size(); }
+
+        std::vector<Replica::Descriptor> GetReplicasDescriptorList() const {
+            std::vector<Replica::Descriptor> result;
+            result.reserve(replicas.size());
+            for (const auto& r : replicas) {
+                result.push_back(r.get_descriptor());
+            }
+            return result;
+        }
     };
 
     static constexpr size_t kNumShards = 1024;  // Number of metadata shards
@@ -478,6 +501,10 @@ class MasterService {
     SegmentManager segment_manager_;
     BufferAllocatorType memory_allocator_type_;
     std::shared_ptr<AllocationStrategy> allocation_strategy_;
+
+    // KV Event Publisher
+    bool enable_kv_event_publish_;
+    std::unique_ptr<KVEventSystem> publisher_;
 };
 
 }  // namespace mooncake

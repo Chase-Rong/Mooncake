@@ -83,6 +83,24 @@ DEFINE_int32(http_metadata_server_port, 8080,
 DEFINE_string(http_metadata_server_host, "0.0.0.0",
               "Host for HTTP metadata server to bind to");
 
+// KV Event Publisher
+DEFINE_bool(enable_kv_event_publish, false,
+            "Enable KV event publishing functionality");
+DEFINE_string(kv_event_publisher_endpoint, "tcp://*:19997",
+              "Endpoint for KV event publisher (ZeroMQ address)");
+DEFINE_string(kv_event_publisher_replay_endpoint, "",
+              "Optional replay endpoint for KV event publisher");
+DEFINE_int32(kv_event_publisher_hwm, 100000,
+             "ZeroMQ high water mark for event publisher");
+DEFINE_uint32(kv_event_publisher_send_interval_ms, 0,
+              "Send interval in milliseconds for event publisher (0 = no delay)");
+DEFINE_uint32(kv_event_publisher_max_batch_size, 50,
+              "Maximum batch size for event publishing");
+DEFINE_bool(kv_event_publisher_auto_port, true,
+            "Enable automatic port switching for event publisher");
+DEFINE_string(kv_event_publisher_topic, "mooncake",
+              "Topic for published events");
+
 void InitMasterConf(const mooncake::DefaultConfig& default_config,
                     mooncake::MasterConfig& master_config) {
     // Initialize the master service configuration from the default config
@@ -141,6 +159,30 @@ void InitMasterConf(const mooncake::DefaultConfig& default_config,
     default_config.GetString("http_metadata_server_host",
                              &master_config.http_metadata_server_host,
                              FLAGS_http_metadata_server_host);
+
+    default_config.GetBool("enable_kv_event_publish",
+                           &master_config.enable_kv_event_publish,
+                           FLAGS_enable_kv_event_publish);
+    default_config.GetString(
+        "kv_event_publisher_endpoint",
+        &master_config.kv_event_publisher_config.endpoint,
+        FLAGS_kv_event_publisher_endpoint);
+
+    std::string replay_endpoint = FLAGS_kv_event_publisher_replay_endpoint;
+    default_config.GetString("kv_event_publisher_replay_endpoint",
+                             &replay_endpoint,
+                             FLAGS_kv_event_publisher_replay_endpoint);
+    if (!replay_endpoint.empty()) {
+        master_config.kv_event_publisher_config.replay_endpoint =
+            replay_endpoint;
+    }
+
+    default_config.GetInt32("kv_event_publisher_hwm",
+                            &master_config.kv_event_publisher_config.hwm,
+                            FLAGS_kv_event_publisher_hwm);
+    default_config.GetString("kv_event_publisher_topic",
+                             &master_config.kv_event_publisher_config.topic,
+                             FLAGS_kv_event_publisher_topic);
 }
 
 void LoadConfigFromCmdline(mooncake::MasterConfig& master_config,
@@ -291,6 +333,23 @@ void LoadConfigFromCmdline(mooncake::MasterConfig& master_config,
         !conf_set) {
         master_config.http_metadata_server_host =
             FLAGS_http_metadata_server_host;
+    }
+    if ((google::GetCommandLineFlagInfo("enable_kv_event_publish", &info) &&
+         !info.is_default) ||
+        !conf_set) {
+        master_config.enable_kv_event_publish = FLAGS_enable_kv_event_publish;
+    }
+    if ((google::GetCommandLineFlagInfo("kv_event_publisher_endpoint", &info) &&
+         !info.is_default) ||
+        !conf_set) {
+        master_config.kv_event_publisher_config.endpoint =
+            FLAGS_kv_event_publisher_endpoint;
+    }
+    if ((google::GetCommandLineFlagInfo("kv_event_publisher_topic", &info) &&
+         !info.is_default) ||
+        !conf_set) {
+        master_config.kv_event_publisher_config.topic =
+            FLAGS_kv_event_publisher_topic;
     }
 }
 

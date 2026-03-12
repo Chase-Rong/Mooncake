@@ -30,6 +30,8 @@ add_store_test(pybind_client_test pybind_client_test.cpp)
 add_store_test(client_metrics_test client_metrics_test.cpp)
 add_store_test(serializer_test serializer_test.cpp)
 add_store_test(non_ha_reconnect_test non_ha_reconnect_test.cpp)
+add_store_test(thread_safe_queue_test thread_safe_queue_test.cpp)
+add_store_test(kv_event_publisher_test kv_event_publisher_test.cpp)
 
 add_subdirectory(e2e)
 
