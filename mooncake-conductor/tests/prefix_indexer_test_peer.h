@@ -65,6 +65,27 @@ class PrefixCacheTableTestPeer {
                                      block->second.disk_owners};
     }
 
+    // 写入顺序链表与其索引的条数。不变量: 两者都应恒等于 blocks.size() ——
+    // 链表若攒下悬空项, order_pos 会无界增长(内存泄漏), 而这在 blocks 快照上
+    // 完全看不出来, 只能这样断言。
+    struct OrderSizes {
+        size_t write_order = 0;
+        size_t order_pos = 0;
+        size_t blocks = 0;
+        int64_t evicted_by_capacity = 0;
+    };
+
+    static OrderSizes Order(const PrefixCacheTable& table,
+                            const ContextKey& context) {
+        auto state = table.LoadContextState(context);
+        if (state == nullptr) return {};
+        std::shared_lock state_lock(state->mutex);
+        return {.write_order = state->write_order.size(),
+                .order_pos = state->order_pos.size(),
+                .blocks = state->blocks.size(),
+                .evicted_by_capacity = state->evicted_by_capacity};
+    }
+
     static PrefixCacheTableSnapshot Snapshot(const PrefixCacheTable& table) {
         PrefixCacheTableSnapshot snapshot;
         std::vector<std::pair<ContextKey, std::shared_ptr<ContextState>>>

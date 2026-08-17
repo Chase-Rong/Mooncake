@@ -149,6 +149,11 @@ std::string ZMQClient::Connect() {
                                                       ::zmq::socket_type::sub);
         // Enable IPv6 for dual-stack support
         sock->set(::zmq::sockopt::ipv6, 1);
+        // 必须在 connect 之前设 —— ZMQ 的 HWM 只在建立连接时生效。
+        // 默认 1000 条太小: 消费一慢 PUB 端就丢, 且 gap 不补发, 永久缺块。
+        if (config_.rcv_hwm > 0) {
+            sock->set(::zmq::sockopt::rcvhwm, config_.rcv_hwm);
+        }
         sock->connect(config_.endpoint);
         // Important: Subscribe to all topics
         sock->set(::zmq::sockopt::subscribe, "");
@@ -258,10 +263,28 @@ std::string ZMQClient::ProcessMessage() {
     }
 
     if (last_seq != -1 && seq > last_seq + 1) {
+        const int64_t missed = seq - last_seq - 1;
+        const int64_t total = dropped_events_.fetch_add(missed) + missed;
+        const int64_t gaps = gap_count_.fetch_add(1) + 1;
         LOG(WARNING) << "Event gap detected service=" << config_.cache_pool_key
-                     << " missed=" << (seq - last_seq - 1)
-                     << " last=" << last_seq << " current=" << seq;
-        // BUG: seq gap detected but no automatic replay triggered.
+                     << " missed=" << missed << " last=" << last_seq
+                     << " current=" << seq << " cumulative_dropped=" << total
+                     << " gaps=" << gaps;
+        // 丢失的事件在这里补: 有 replay_endpoint 就立刻请求重放, 否则只能记账。
+        // 不补的后果是索引永久缺块, 而 /query 无法把"缺块"与"真的没缓存"区分开
+        // —— cache-aware 调度会据此放弃实际存在的缓存。
+        if (!config_.replay_endpoint.empty()) {
+            if (auto err = RequestReplay(last_seq + 1); !err.empty()) {
+                LOG(WARNING) << "Gap replay request failed service="
+                             << config_.cache_pool_key
+                             << " from=" << (last_seq + 1) << " error=" << err;
+            }
+        } else {
+            LOG(WARNING) << "No replay_endpoint configured; " << missed
+                         << " events are permanently lost from the index "
+                            "service="
+                         << config_.cache_pool_key;
+        }
     }
 
     // Update Sequence immediately to keep state fresh

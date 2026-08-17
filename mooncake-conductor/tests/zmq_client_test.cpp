@@ -617,7 +617,13 @@ TEST(ZMQClient, SequenceTrackingWithReplayConfigured) {
     client.Stop();
 }
 
-TEST(ZMQClient, EventGapIsProcessedWithoutAutomaticReplay) {
+// seq gap 意味着 PUB 端已经丢过消息。不补发的后果是索引永久缺块，而 /query
+// 分不出"缺块"和"真的没缓存"，cache-aware 会据此放弃实际存在的缓存 ——
+// 8P 机群实测视图滞后 306s 就有这一环。所以配了 replay_endpoint 就必须补发。
+//
+// 本测试原名 EventGapIsProcessedWithoutAutomaticReplay，断言补发次数为 0，
+// 把当时源码里 `// BUG: ... no automatic replay triggered` 的行为钉成了预期。
+TEST(ZMQClient, EventGapRequestsReplayFromFirstMissedSequence) {
     MockPublisher publisher;
     auto handler = std::make_shared<MockEventHandler>();
     const auto config = TestConfig(publisher);
@@ -629,10 +635,40 @@ TEST(ZMQClient, EventGapIsProcessedWithoutAutomaticReplay) {
     ASSERT_TRUE(PublishUntilHandled(*handler, 10, endpoint, [&] {
         publisher.Publish("", first_payload, 10);
     }));
+    EXPECT_EQ(client.GetDroppedEvents(), 0);
+    EXPECT_EQ(client.GetGapCount(), 0);
+
+    // 跳到 15：11~14 这四条丢了。
     publisher.Publish("", PackVllmStoredBatch(2), 15);
     ASSERT_TRUE(handler->WaitForBatch(15, endpoint, std::chrono::seconds(2)));
     EXPECT_EQ(client.GetLastSequence(), 15);
-    EXPECT_EQ(publisher.ReplayRequestCount(), 0u);
+    EXPECT_EQ(publisher.ReplayRequestCount(), 1u);
+    EXPECT_EQ(client.GetDroppedEvents(), 4);
+    EXPECT_EQ(client.GetGapCount(), 1);
+    client.Stop();
+}
+
+// 没配 replay_endpoint 时补不回来，但**必须记账** —— 丢事件原先完全静默，
+// 于是"索引里没有"既可能是没缓存也可能是丢了消息，两者无法区分。
+TEST(ZMQClient, EventGapIsAccountedWhenReplayUnavailable) {
+    MockPublisher publisher;
+    auto handler = std::make_shared<MockEventHandler>();
+    auto config = TestConfig(publisher);
+    config.replay_endpoint.clear();
+    const std::string endpoint = config.endpoint;
+    ZMQClient client(config, handler);
+    ASSERT_EQ(client.Start(), "");
+
+    const auto first_payload = PackVllmStoredBatch(1);
+    ASSERT_TRUE(PublishUntilHandled(*handler, 10, endpoint, [&] {
+        publisher.Publish("", first_payload, 10);
+    }));
+    publisher.Publish("", PackVllmStoredBatch(2), 13);
+    ASSERT_TRUE(handler->WaitForBatch(13, endpoint, std::chrono::seconds(2)));
+    EXPECT_EQ(client.GetLastSequence(), 13);
+    EXPECT_EQ(publisher.ReplayRequestCount(), 0u);  // 没端点可请求
+    EXPECT_EQ(client.GetDroppedEvents(), 2);        // 但账要记上
+    EXPECT_EQ(client.GetGapCount(), 1);
     client.Stop();
 }
 

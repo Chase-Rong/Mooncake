@@ -885,4 +885,80 @@ TEST(GlobalView, ReportsProfileRegistrationAndOwnerMapSize) {
     EXPECT_EQ(view.contexts[0].prefix_count, 2u);
 }
 
+// 容量上限防的是"stored 进了、removed 丢了"造成的索引单调膨胀:
+// 一旦失配, unordered_map 反复 rehash、插入与查询同步变慢, 消费跟不上又丢更多
+// removed, 正反馈直到索引完全失效。上限是兜底, 正常镜像状态下不该触发。
+TEST(Capacity, EvictsOldestWrittenPrefixesWhenOverLimit) {
+    PrefixCacheTable table(10);
+    RegisterOrFail(table, Registration());
+
+    // 逐条写入 1..14, 写入顺序即淘汰顺序(表尾最旧)。
+    for (uint64_t i = 1; i <= 14; ++i) {
+        ASSERT_EQ(table.StoreGpu(Gpu({Prefix(i)})), "");
+    }
+
+    const auto snapshot = PrefixCacheTableTestPeer::Snapshot(table);
+    const auto& blocks = snapshot.contexts.at(TestContext()).blocks;
+    // 超过 10 后一次降到 10×0.9=9, 之后每次超限再降 —— 稳态条数不超过上限。
+    EXPECT_LE(blocks.size(), 10u);
+    // 最新写的必须还在, 最旧写的必须已被淘汰。
+    EXPECT_TRUE(blocks.contains(Prefix(14)));
+    EXPECT_FALSE(blocks.contains(Prefix(1)));
+}
+
+TEST(Capacity, UnlimitedWhenBlockLimitIsZero) {
+    PrefixCacheTable table(0);
+    RegisterOrFail(table, Registration());
+    for (uint64_t i = 1; i <= 50; ++i) {
+        ASSERT_EQ(table.StoreGpu(Gpu({Prefix(i)})), "");
+    }
+    EXPECT_EQ(PrefixCacheTableTestPeer::Snapshot(table)
+                  .contexts.at(TestContext())
+                  .blocks.size(),
+              50u);
+}
+
+// 写入顺序链表必须与 blocks 同步增删。悬空项在 blocks 快照上完全看不出来
+// (淘汰是 while(size > target) 循环, 多转几圈结果相同), 真实危害是 order_pos
+// 无界增长 —— 正是这类"看不见的膨胀"把索引拖垮的。所以直接断言不变量。
+TEST(Capacity, OrderTrackingStaysInSyncWithBlocks) {
+    PrefixCacheTable table(10);
+    RegisterOrFail(table, Registration());
+    const ContextKey context = TestContext();
+
+    for (uint64_t i = 1; i <= 6; ++i) {
+        ASSERT_EQ(table.StoreGpu(Gpu({Prefix(i)})), "");
+    }
+    auto sizes = PrefixCacheTableTestPeer::Order(table, context);
+    EXPECT_EQ(sizes.blocks, 6u);
+    EXPECT_EQ(sizes.write_order, 6u);
+    EXPECT_EQ(sizes.order_pos, 6u);
+
+    // 就地删除(RemoveGpu 路径)必须摘链表项。
+    for (uint64_t i = 1; i <= 3; ++i) {
+        ASSERT_EQ(table.RemoveGpu(Gpu({Prefix(i)})), "");
+    }
+    sizes = PrefixCacheTableTestPeer::Order(table, context);
+    EXPECT_EQ(sizes.blocks, 3u);
+    EXPECT_EQ(sizes.write_order, 3u);
+    EXPECT_EQ(sizes.order_pos, 3u);
+
+    // 全表清理(ClearGpu 路径)同样要摘。
+    ASSERT_EQ(table.ClearGpu(ClearFor()), "");
+    sizes = PrefixCacheTableTestPeer::Order(table, context);
+    EXPECT_EQ(sizes.blocks, 0u);
+    EXPECT_EQ(sizes.write_order, 0u);
+    EXPECT_EQ(sizes.order_pos, 0u);
+
+    // 触发容量淘汰后不变量依然成立。
+    for (uint64_t i = 20; i <= 40; ++i) {
+        ASSERT_EQ(table.StoreGpu(Gpu({Prefix(i)})), "");
+    }
+    sizes = PrefixCacheTableTestPeer::Order(table, context);
+    EXPECT_LE(sizes.blocks, 10u);
+    EXPECT_EQ(sizes.write_order, sizes.blocks);
+    EXPECT_EQ(sizes.order_pos, sizes.blocks);
+    EXPECT_GT(sizes.evicted_by_capacity, 0);
+}
+
 }  // namespace

@@ -36,6 +36,11 @@ struct ZMQClientConfig {
     std::chrono::milliseconds poll_timeout{100};
     std::chrono::milliseconds replay_timeout{5000};
     std::chrono::milliseconds reconnect_delay{1000};
+    // SUB 接收高水位(条)。ZMQ 默认 1000 —— 消费一慢, PUB 端(vLLM)直接丢弃,
+    // 而 seq gap 检测到也不补发, 丢掉的 block 永久不进索引。
+    // 8P 机群实测: 瞬时上百条消息即溢出。放大到 20 万条换约 200MB 上限,
+    // 给消费侧留出吸收突发的余量。
+    int rcv_hwm = 200000;
 };
 
 // Returns empty string when valid, error message otherwise.
@@ -63,6 +68,10 @@ class ZMQClient {
 
     int64_t GetLastSequence() const;
 
+    // 累计丢失事件数 / gap 次数。用于判断"索引里没有"是真没缓存还是事件丢了。
+    int64_t GetDroppedEvents() const { return dropped_events_.load(); }
+    int64_t GetGapCount() const { return gap_count_.load(); }
+
    private:
     friend class ZMQClientTestPeer;
 
@@ -89,6 +98,10 @@ class ZMQClient {
     bool connected_ = false;
     int64_t last_seq_ = -1;
     std::chrono::milliseconds reconnect_delay_;
+    // 累计丢失的事件条数(由 seq gap 推算)。丢事件原先完全静默 ——
+    // 索引里少了 block 与"缓存真的没有"在 /query 上无法区分, 必须能观测。
+    std::atomic<int64_t> dropped_events_{0};
+    std::atomic<int64_t> gap_count_{0};
 
     // Lifecycle.
     std::atomic<bool> stop_requested_{false};
