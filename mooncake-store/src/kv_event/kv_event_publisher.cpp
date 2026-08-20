@@ -526,9 +526,18 @@ void KvEventPublisher::PublishBatch(const std::vector<PendingEvent>& batch) {
                       : (is_cleared ? "AllBlocksCleared" : "BlockRemoved");
         const std::string& tenant_id =
             item.pending.tenant_id.empty() ? "default" : item.pending.tenant_id;
-        const std::string& model_name = item.pending.context.model_name.empty()
-                                            ? config_.model_name
-                                            : item.pending.context.model_name;
+        // 显式配置优先于从 object_key 反推的值。原来的优先级是反的, 后果是:
+        // 连接器在 key 首段写的是权重目录名(vllm-ascend 的 PoolKey 用
+        // group_metadata.model_name, 例如 "Qwen3-30B-A3B-Instruct-2507"), 而
+        // Conductor 的 ContextKey 由推理侧注册, 用的是对外服务名(/v1/models 返回
+        // 值, 例如 "qwen30")。两者不一致时共享层事件落到另一个 context 桶,
+        // Conductor 全量拒收 "ContextKey is not registered" —— 且订阅、解码、
+        // 字段校验全部正常, 两侧日志都不报错, 只能靠订阅 PUB 端点抓原始事件才
+        // 看得出来。--kv_events_model_name 是运维显式声明的契约, key 里那段只是
+        // 连接器的实现细节, 因此以前者为准; 未配置时才回退到 key。
+        const std::string& model_name = config_.model_name.empty()
+                                            ? item.pending.context.model_name
+                                            : config_.model_name;
 
         const size_t connector_metadata_fields =
             static_cast<size_t>(

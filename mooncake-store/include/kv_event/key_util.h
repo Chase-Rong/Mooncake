@@ -161,9 +161,20 @@ inline std::optional<KvEventKeyInfo> ParseKvEventKey(
     }
 
     // vLLM Ascend normal:
-    // model@pcpN@dcpN@head_or_tp_rank:N@pp_rank:N@hash
+    // model@pcpN@dcpN@head_or_tp_rank:N@pp_rank:N[@group:N][@cache_role:S]
+    //   [@cache_family:S]@hash
     // vLLM Ascend layerwise:
     // model@pcpN@dcpN@head_or_tp_rank:N@hash@layer_id
+    //
+    // The three trailing labels are optional because the connector added them
+    // after this parser shipped: PoolKey.to_string() (vllm_ascend
+    // .../ascend_store/config_data.py) now always emits group/cache_role/
+    // cache_family between pp_rank and the hash. Requiring a fixed part count
+    // made every such key unparseable, which silently degraded the publisher to
+    // the seq_hash-only fallback and left connector_block_hash empty -- the
+    // Conductor then rejects the whole batch with "connector_block_hash is
+    // required". Consume whatever labels are present and treat the last part as
+    // the hash instead of pinning the length.
     for (size_t i = 1; i < parts.size(); ++i) {
         int64_t pcp_rank = 0;
         if (!detail::ParseLabeledInt(parts[i], "pcp", &pcp_rank)) {
@@ -181,12 +192,37 @@ inline std::optional<KvEventKeyInfo> ParseKvEventKey(
         size_t hash_index = 0;
         int64_t pp_rank = 0;
         int64_t layer_id = 0;
-        if (i + 5 == parts.size() &&
-            detail::ParseLabeledInt(parts[i + 3], "pp_rank:", &pp_rank)) {
-            hash_index = i + 4;
-        } else if (i + 5 == parts.size() &&
-                   detail::ParseNonNegativeInt(parts[i + 4], &layer_id)) {
-            hash_index = i + 3;
+        int64_t group_id = 0;
+        bool has_pp_rank = false;
+        bool has_group = false;
+        bool has_layer_id = false;
+
+        size_t cursor = i + 3;
+        if (detail::ParseLabeledInt(parts[cursor], "pp_rank:", &pp_rank)) {
+            has_pp_rank = true;
+            ++cursor;
+        }
+        // Stop before the final part so the hash is never consumed as a label.
+        while (cursor + 1 < parts.size()) {
+            if (parts[cursor].starts_with("group:")) {
+                if (!detail::ParseLabeledInt(parts[cursor], "group:",
+                                             &group_id)) {
+                    break;
+                }
+                has_group = true;
+            } else if (!parts[cursor].starts_with("cache_role:") &&
+                       !parts[cursor].starts_with("cache_family:")) {
+                break;
+            }
+            ++cursor;
+        }
+
+        if (has_pp_rank && cursor + 1 == parts.size()) {
+            hash_index = cursor;
+        } else if (!has_pp_rank && cursor + 2 == parts.size() &&
+                   detail::ParseNonNegativeInt(parts[cursor + 1], &layer_id)) {
+            hash_index = cursor;
+            has_layer_id = true;
         } else {
             continue;
         }
@@ -200,9 +236,13 @@ inline std::optional<KvEventKeyInfo> ParseKvEventKey(
         info.head_or_tp_rank = head_or_tp_rank;
         info.pcp_rank = pcp_rank;
         info.dcp_rank = dcp_rank;
-        if (hash_index == i + 4) {
+        if (has_pp_rank) {
             info.pp_rank = pp_rank;
-        } else {
+        }
+        if (has_group) {
+            info.group_id = group_id;
+        }
+        if (has_layer_id) {
             info.layer_id = layer_id;
         }
         return info;
