@@ -1687,7 +1687,7 @@ class MasterService {
         }
 
         void EraseFromProcessing() NO_THREAD_SAFETY_ANALYSIS {
-            tenant_state_->processing_keys.erase(processing_it_);
+            tenant_state_->processing_keys.erase(object_id_.user_key);
             processing_it_ = tenant_state_->processing_keys.end();
             MaybeEraseEmptyTenant();
         }
