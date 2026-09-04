@@ -66,6 +66,17 @@ if(NOT TARGET yalantinglibs::yalantinglibs)
   find_package(yalantinglibs CONFIG REQUIRED)
 endif()
 
+# ThreadSanitizer build for the concurrency tests. Run the suite with
+# TSAN_OPTIONS="suppressions=<source-dir>/tests/tsan.supp" ctest; the
+# suppressions cover uninstrumented libzmq and glog internals only, so races in
+# conductor code are still reported.
+option(CONDUCTOR_CPP_TSAN "Build mooncake-conductor with ThreadSanitizer" OFF)
+if(CONDUCTOR_CPP_TSAN)
+  add_compile_options(-fsanitize=thread -g)
+  add_link_options(-fsanitize=thread)
+  message(STATUS "conductor: ThreadSanitizer enabled")
+endif()
+
 add_library(
   conductor_cpp_core STATIC
   src/common/utils.cpp

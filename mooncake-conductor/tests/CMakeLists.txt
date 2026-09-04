@@ -16,7 +16,9 @@ add_executable(
   prefix_indexer_test.cpp
   msg_decoder_test.cpp
   zmq_client_test.cpp
-  event_manager_test.cpp)
+  event_manager_test.cpp
+  event_ingest_integration_test.cpp
+  concurrency_test.cpp)
 
 target_link_libraries(conductor_test PRIVATE conductor_cpp_core
                                              ${CONDUCTOR_GTEST_LIBS})
