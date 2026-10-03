@@ -163,6 +163,10 @@ jobs:
             $SUDO apt-get update -y || true
           fi
           $SUDO bash -x dependencies.sh -y
+          $SUDO find /usr/include /usr/local/include -type f \( -name zmq.hpp -o -name zmq_addon.hpp \) -print -delete
+          if find /usr/include /usr/local/include -type f \( -name zmq.hpp -o -name zmq_addon.hpp \) | grep .; then exit 1; fi
+          test -f /usr/include/zmq.h
+          echo "C API header present; cppzmq headers absent"
           echo "/usr/local/go/bin" >> "$GITHUB_PATH"
           gen=(); [ -n "$CMAKE_GEN" ] && gen=(-G "$CMAKE_GEN")
           ep=(); [ -n "$EP_TORCH_VERSIONS_INPUT" ] && ep=(-DEP_TORCH_VERSIONS="$EP_TORCH_VERSIONS_INPUT")
