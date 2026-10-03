@@ -1,0 +1,125 @@
+name: Conductor release fix verification
+'on':
+  push:
+    branches:
+    - verify/conductor-rocm-smoke-fix-20261003
+permissions:
+  contents: read
+jobs:
+  rocm:
+    runs-on: ubuntu-22.04
+    container: rocm/dev-ubuntu-22.04:7.2.3-complete
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+        - '3.12'
+    env:
+      HIP_BUILD: '1'
+    steps:
+    - name: Install git (pre-checkout)
+      shell: bash
+      run: 'set -eo pipefail
+
+        export DEBIAN_FRONTEND=noninteractive
+
+        apt-get update -y
+
+        apt-get install -y --no-install-recommends git ca-certificates
+
+        '
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.sha }}
+        fetch-depth: 0
+        submodules: recursive
+        persist-credentials: false
+    - name: Check out release verification helper
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.workflow_sha }}
+        path: .release-ci
+        persist-credentials: false
+        sparse-checkout: scripts/e2e/python/verify_rocm_wheel.py
+        sparse-checkout-cone-mode: false
+    - name: Mark repository as safe
+      shell: bash
+      run: git config --global --add safe.directory "$GITHUB_WORKSPACE" || true
+    - name: Install toolchain
+      shell: bash
+      run: "set -eo pipefail\nexport DEBIAN_FRONTEND=noninteractive\napt-get update -y\napt-get install -y --no-install-recommends\
+        \ \\\n  git curl ca-certificates build-essential sudo pkg-config \\\n  ninja-build\n# hipify-perl is required by the\
+        \ CMake USE_HIP path.\necho \"/opt/rocm/bin\" >> \"$GITHUB_PATH\"\n"
+    - name: Setup Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Set Python bin
+      shell: bash
+      run: 'set -euo pipefail
+
+        PYTHON_BIN="$(command -v python${{ matrix.python-version }})"
+
+        "$PYTHON_BIN" --version
+
+        "$PYTHON_BIN" -m pip --version
+
+        echo "PYTHON_BIN=${PYTHON_BIN}" >> "$GITHUB_ENV"
+
+        '
+    - name: Install dependencies
+      shell: bash
+      run: 'set -eo pipefail
+
+        bash -x dependencies.sh -y
+
+        echo "/usr/local/go/bin" >> "$GITHUB_PATH"
+
+        '
+    - name: Configure project
+      shell: bash
+      run: "set -eo pipefail\nexport PATH=\"/opt/rocm/bin:$PATH\"   # hipify-perl for USE_HIP\nrm -rf build && mkdir build\
+        \ && cd build\ncmake -G Ninja .. \\\n  -DUSE_HIP=ON -DUSE_CUDA=OFF -DWITH_EP=OFF -DWITH_CONDUCTOR=ON \\\n  -DENABLE_MULTI_PROTOCOL=ON\
+        \ \\\n  -DUSE_HTTP=ON -DUSE_ETCD=ON -DSTORE_USE_ETCD=ON \\\n  -DBUILD_UNIT_TESTS=OFF -DENABLE_DEBUG_SYMBOLS=OFF \\\
+        \n  -DCMAKE_BUILD_TYPE=Release \\\n  -DPython3_EXECUTABLE=\"${PYTHON_BIN}\"\n"
+    - name: Build project
+      env:
+        MAX_JOBS: '2'
+      shell: bash
+      run: "set -eo pipefail\nexport PATH=\"/opt/rocm/bin:$PATH\"\ncd build\n# Retry to ride out transient Go module (proxy.golang.org)\
+        \ fetch errors\n# during the etcd-wrapper build; Go caches modules, so retries resume.\nn=0\nuntil cmake --build .\
+        \ -j\"${MAX_JOBS}\"; do\n  n=$((n+1))\n  if [ \"$n\" -ge 3 ]; then echo \"Build failed after $n attempts\"; exit 1;\
+        \ fi\n  echo \"Build attempt $n failed; retrying in 15s...\"; sleep 15\ndone\ncmake --install .\n"
+    - name: Generate Python version tag
+      id: generate_tag_release
+      shell: bash
+      run: echo "python_version_tag=$(echo ${{ matrix.python-version }} | tr -d '.')" >> "$GITHUB_OUTPUT"
+    - name: Build Python wheel
+      shell: bash
+      run: "set -eo pipefail\nexport PATH=\"/opt/rocm/bin:$PATH\"\nexport LD_LIBRARY_PATH=\"${LD_LIBRARY_PATH:-}:/usr/local/lib\"\
+        \nHIP_BUILD=1 PYTHON_VERSION=${{ matrix.python-version }} \\\n  OUTPUT_DIR=dist-rocm-py${{ steps.generate_tag_release.outputs.python_version_tag\
+        \ }} \\\n  ./scripts/build_wheel.sh\n"
+    - name: Assert ROCm package name
+      shell: bash
+      run: "set -eo pipefail\n# Defense in depth: never let a wheel that was not renamed to the ROCm\n# package (e.g. HIP_BUILD\
+        \ silently ignored) reach the publish steps.\ndir=\"mooncake-wheel/dist-rocm-py${{ steps.generate_tag_release.outputs.python_version_tag\
+        \ }}\"\nif ! ls \"${dir}\"/mooncake_transfer_engine_rocm-*.whl >/dev/null 2>&1; then\n  echo \"::error::Built wheel\
+        \ is not named mooncake-transfer-engine-rocm:\"\n  ls -la \"${dir}\" || true\n  exit 1\nfi\n"
+    - name: Smoke test the exact release wheel
+      shell: bash
+      run: "set -eo pipefail\n# Install the actual per-matrix release artifact (cp310-cp313) into a\n# fresh venv and exercise\
+        \ the packaged binary, so packaging/ELF-layout\n# failures in any version are caught before this wheel reaches PyPI.\n\
+        # Import both native bindings as well as exercising the packaged\n# binary. No GPU is needed for these load-time checks.\n\
+        smoke_venv=$(mktemp -d)\n\"${PYTHON_BIN}\" -m venv \"$smoke_venv\"\n\"$smoke_venv/bin/python\" -m pip install --no-deps\
+        \ \\\n  mooncake-wheel/dist-rocm-py${{ steps.generate_tag_release.outputs.python_version_tag }}/*.whl\nexport LD_LIBRARY_PATH=\"\
+        /opt/rocm/lib:/usr/local/lib:${LD_LIBRARY_PATH:-}\"\n\"$smoke_venv/bin/python\" \\\n  .release-ci/scripts/e2e/python/verify_rocm_wheel.py\n\
+        site=\"$(\"$smoke_venv/bin/python\" -c 'import mooncake, os; print(os.path.dirname(mooncake.__file__))')\"\n\"$site/mooncake_master\"\
+        \ --version\n"
+    - name: Upload Python wheel artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: mooncake-wheel-rocm-x86_64-py${{ steps.generate_tag_release.outputs.python_version_tag }}
+        path: mooncake-wheel/dist-rocm-py${{ steps.generate_tag_release.outputs.python_version_tag }}/*.whl
