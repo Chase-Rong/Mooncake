@@ -15,55 +15,11 @@ endif()
 find_package(Threads REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 
-# Conductor uses typed socket options and multipart helpers from cppzmq >= 4.7.
-# EPEL 8 ships 4.4.1, so having zmq.hpp alone does not prove compatibility.
-find_package(cppzmq 4.7 QUIET)
-if(TARGET cppzmq)
-  set(CONDUCTOR_ZMQ_LIBS cppzmq)
-  message(STATUS "conductor: cppzmq >= 4.7 via package config")
-else()
-  find_path(CONDUCTOR_ZMQ_INCLUDE_DIR zmq.hpp)
-  find_library(CONDUCTOR_ZMQ_LIBRARY NAMES zmq libzmq)
-  if(NOT CONDUCTOR_ZMQ_LIBRARY)
-    message(FATAL_ERROR "libzmq not found; install zeromq-devel or libzmq3-dev")
-  endif()
-  # Debian/Ubuntu may ship suitable headers without a CMake package config.
-  include(CheckCXXSourceCompiles)
-  include(CMakePushCheckState)
-  cmake_push_check_state(RESET)
-  if(CONDUCTOR_ZMQ_INCLUDE_DIR)
-    set(CMAKE_REQUIRED_INCLUDES ${CONDUCTOR_ZMQ_INCLUDE_DIR})
-  endif()
-  unset(CONDUCTOR_HAS_MODERN_CPPZMQ CACHE)
-  check_cxx_source_compiles(
-    "#include <zmq.hpp>
-     #include <zmq_addon.hpp>
-     #if CPPZMQ_VERSION < ZMQ_MAKE_VERSION(4, 7, 0)
-     #error cppzmq 4.7 or newer is required
-     #endif
-     int main() { return 0; }"
-    CONDUCTOR_HAS_MODERN_CPPZMQ)
-  cmake_pop_check_state()
-  if(CONDUCTOR_HAS_MODERN_CPPZMQ)
-    set(CONDUCTOR_ZMQ_INCLUDES ${CONDUCTOR_ZMQ_INCLUDE_DIR})
-  else()
-    # Header-only fallback; keep the distro's libzmq runtime. Use a pinned,
-    # verified archive and support FETCHCONTENT_SOURCE_DIR_CONDUCTOR_CPPZMQ for
-    # offline builders, just like the other FetchContent dependencies.
-    include(FetchContent)
-    FetchContent_Declare(
-      conductor_cppzmq
-      URL ${GH_MIRROR}https://github.com/zeromq/cppzmq/archive/refs/tags/v4.10.0.tar.gz
-      URL_HASH
-        SHA256=c81c81bba8a7644c84932225f018b5088743a22999c6d82a2b5f5cd1e6942b74)
-    FetchContent_GetProperties(conductor_cppzmq)
-    if(NOT conductor_cppzmq_POPULATED)
-      FetchContent_Populate(conductor_cppzmq)
-    endif()
-    set(CONDUCTOR_ZMQ_INCLUDES ${conductor_cppzmq_SOURCE_DIR})
-    message(STATUS "conductor: using pinned cppzmq 4.10.0 headers")
-  endif()
-  set(CONDUCTOR_ZMQ_LIBS ${CONDUCTOR_ZMQ_LIBRARY})
+# Standalone builds own their dependencies; the top-level build provides this
+# target before adding Conductor and Store.
+if(NOT TARGET Mooncake::libzmq)
+  include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/Dependencies.cmake)
+  mooncake_provide_libzmq()
 endif()
 
 # msgpack-cxx is header-only; older distributions have no CMake config.
@@ -120,12 +76,12 @@ target_include_directories(
   conductor_cpp_core
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
          ${CMAKE_CURRENT_SOURCE_DIR}/../mooncake-common/include
-         ${CONDUCTOR_ZMQ_INCLUDES} ${CONDUCTOR_MSGPACK_INCLUDES})
+         ${CONDUCTOR_MSGPACK_INCLUDES})
 
 target_link_libraries(
   conductor_cpp_core
   PUBLIC OpenSSL::Crypto
-         ${CONDUCTOR_ZMQ_LIBS}
+         Mooncake::libzmq
          ${CONDUCTOR_MSGPACK_LIBS}
          yalantinglibs::yalantinglibs
          glog::glog

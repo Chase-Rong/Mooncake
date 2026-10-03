@@ -216,8 +216,6 @@ if [ "$OS" = "ubuntu" ] || [ "$OS" = "debian" ]; then
     check_success "Failed to install system packages"
 
 elif [ "$OS" = "centos" ] || [ "$OS" = "rhel" ] || [ "$OS" = "rocky" ] || [ "$OS" = "almalinux" ] || [ "$OS" = "euleros" ] || [ "$OS" = "openeuler" ]; then
-    # EPEL provides cppzmq-devel (zmq.hpp/zmq_addon.hpp); zeromq-devel
-    # supplies only the C API. Both are required by Conductor.
     SYSTEM_PACKAGES="@development \
                      cmake \
                      ninja-build \
@@ -240,7 +238,6 @@ elif [ "$OS" = "centos" ] || [ "$OS" = "rhel" ] || [ "$OS" = "rocky" ] || [ "$OS
                      jemalloc-devel \
                      msgpack-devel \
                      zeromq-devel \
-                     cppzmq-devel \
                      libzstd-devel \
                      pkgconf-pkg-config \
                      elfutils-libelf-devel \
