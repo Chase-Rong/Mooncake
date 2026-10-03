@@ -15,30 +15,58 @@ endif()
 find_package(Threads REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 
-# cppzmq and msgpack-cxx are header-only C++ bindings whose packaging varies:
-# some distributions ship a CMake package config, while Debian and Ubuntu up to
-# 22.04 bundle the headers into libzmq3-dev and libmsgpack-dev with no config at
-# all. Prefer the config when present and otherwise locate the headers directly,
-# so both layouts configure. cppzmq additionally needs the libzmq C library;
-# msgpack-cxx is header-only.
-find_package(cppzmq QUIET)
+# Conductor uses typed socket options and multipart helpers from cppzmq >= 4.7.
+# EPEL 8 ships 4.4.1, so having zmq.hpp alone does not prove compatibility.
+find_package(cppzmq 4.7 QUIET)
 if(TARGET cppzmq)
   set(CONDUCTOR_ZMQ_LIBS cppzmq)
-  message(STATUS "conductor: cppzmq via package config")
+  message(STATUS "conductor: cppzmq >= 4.7 via package config")
 else()
   find_path(CONDUCTOR_ZMQ_INCLUDE_DIR zmq.hpp)
   find_library(CONDUCTOR_ZMQ_LIBRARY NAMES zmq libzmq)
-  if(NOT CONDUCTOR_ZMQ_INCLUDE_DIR OR NOT CONDUCTOR_ZMQ_LIBRARY)
-    message(
-      FATAL_ERROR
-        "cppzmq headers (zmq.hpp) or libzmq not found; install cppzmq-dev or libzmq3-dev"
-    )
+  if(NOT CONDUCTOR_ZMQ_LIBRARY)
+    message(FATAL_ERROR "libzmq not found; install zeromq-devel or libzmq3-dev")
+  endif()
+  # Debian/Ubuntu may ship suitable headers without a CMake package config.
+  include(CheckCXXSourceCompiles)
+  include(CMakePushCheckState)
+  cmake_push_check_state(RESET)
+  if(CONDUCTOR_ZMQ_INCLUDE_DIR)
+    set(CMAKE_REQUIRED_INCLUDES ${CONDUCTOR_ZMQ_INCLUDE_DIR})
+  endif()
+  unset(CONDUCTOR_HAS_MODERN_CPPZMQ CACHE)
+  check_cxx_source_compiles(
+    "#include <zmq.hpp>
+     #include <zmq_addon.hpp>
+     #if CPPZMQ_VERSION < ZMQ_MAKE_VERSION(4, 7, 0)
+     #error cppzmq 4.7 or newer is required
+     #endif
+     int main() { return 0; }"
+    CONDUCTOR_HAS_MODERN_CPPZMQ)
+  cmake_pop_check_state()
+  if(CONDUCTOR_HAS_MODERN_CPPZMQ)
+    set(CONDUCTOR_ZMQ_INCLUDES ${CONDUCTOR_ZMQ_INCLUDE_DIR})
+  else()
+    # Header-only fallback; keep the distro's libzmq runtime. Use a pinned,
+    # verified archive and support FETCHCONTENT_SOURCE_DIR_CONDUCTOR_CPPZMQ for
+    # offline builders, just like the other FetchContent dependencies.
+    include(FetchContent)
+    FetchContent_Declare(
+      conductor_cppzmq
+      URL ${GH_MIRROR}https://github.com/zeromq/cppzmq/archive/refs/tags/v4.10.0.tar.gz
+      URL_HASH
+        SHA256=c81c81bba8a7644c84932225f018b5088743a22999c6d82a2b5f5cd1e6942b74)
+    FetchContent_GetProperties(conductor_cppzmq)
+    if(NOT conductor_cppzmq_POPULATED)
+      FetchContent_Populate(conductor_cppzmq)
+    endif()
+    set(CONDUCTOR_ZMQ_INCLUDES ${conductor_cppzmq_SOURCE_DIR})
+    message(STATUS "conductor: using pinned cppzmq 4.10.0 headers")
   endif()
   set(CONDUCTOR_ZMQ_LIBS ${CONDUCTOR_ZMQ_LIBRARY})
-  set(CONDUCTOR_ZMQ_INCLUDES ${CONDUCTOR_ZMQ_INCLUDE_DIR})
-  message(
-    STATUS "conductor: cppzmq via headers in ${CONDUCTOR_ZMQ_INCLUDE_DIR}")
 endif()
+
+# msgpack-cxx is header-only; older distributions have no CMake config.
 
 find_package(msgpack-cxx QUIET)
 if(TARGET msgpack-cxx)
