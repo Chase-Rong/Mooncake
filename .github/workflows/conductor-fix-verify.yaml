@@ -1,0 +1,22 @@
+name: Conductor release fix verification
+'on':
+  push:
+    branches:
+    - verify/conductor-manylinux-fixes-20261003
+permissions:
+  contents: read
+jobs:
+  cuda:
+    uses: ./.github/workflows/_build-wheel.yaml
+    with:
+      variant: cuda
+      python-versions: '["3.10"]'
+      artifact-prefix: fixed-cuda
+      version-override: 0.0.0.dev0
+  cuda13:
+    uses: ./.github/workflows/_build-wheel.yaml
+    with:
+      variant: cuda13
+      python-versions: '["3.12"]'
+      artifact-prefix: fixed-cuda13
+      version-override: 0.0.0.dev0
