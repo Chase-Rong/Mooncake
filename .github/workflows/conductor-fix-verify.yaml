@@ -1,0 +1,430 @@
+name: Conductor release fix verification
+'on':
+  push:
+    branches:
+    - verify/conductor-release-fixes-20261003
+permissions:
+  contents: read
+jobs:
+  cuda:
+    uses: ./.github/workflows/_build-wheel.yaml
+    with:
+      variant: cuda
+      python-versions: '["3.10"]'
+      artifact-prefix: fixed-cuda
+      version-override: 0.0.0.dev0
+  cuda13:
+    uses: ./.github/workflows/_build-wheel.yaml
+    with:
+      variant: cuda13
+      python-versions: '["3.12"]'
+      artifact-prefix: fixed-cuda13
+      version-override: 0.0.0.dev0
+  efa:
+    uses: ./.github/workflows/_build-efa-wheel.yaml
+    with:
+      variant: non-cuda
+      python-versions: '["3.10"]'
+      build-profile: release
+      cmake-args: -DWITH_CONDUCTOR=ON -DUSE_HTTP=ON -DUSE_ETCD=ON -DWITH_EP=OFF -DSTORE_USE_ETCD=ON
+      artifact-prefix: fixed-efa
+  rocm:
+    runs-on: ubuntu-22.04
+    container: rocm/dev-ubuntu-22.04:7.2.3-complete
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+        - '3.12'
+    env:
+      HIP_BUILD: '1'
+    steps:
+    - name: Install git (pre-checkout)
+      shell: bash
+      run: 'set -eo pipefail
+
+        export DEBIAN_FRONTEND=noninteractive
+
+        apt-get update -y
+
+        apt-get install -y --no-install-recommends git ca-certificates
+
+        '
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.sha }}
+        fetch-depth: 0
+        submodules: recursive
+        persist-credentials: false
+    - name: Check out release verification helper
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.workflow_sha }}
+        path: .release-ci
+        persist-credentials: false
+        sparse-checkout: scripts/e2e/python/verify_rocm_wheel.py
+        sparse-checkout-cone-mode: false
+    - name: Mark repository as safe
+      shell: bash
+      run: git config --global --add safe.directory "$GITHUB_WORKSPACE" || true
+    - name: Install toolchain
+      shell: bash
+      run: "set -eo pipefail\nexport DEBIAN_FRONTEND=noninteractive\napt-get update -y\napt-get install -y --no-install-recommends\
+        \ \\\n  git curl ca-certificates build-essential sudo pkg-config \\\n  ninja-build\n# hipify-perl is required by the\
+        \ CMake USE_HIP path.\necho \"/opt/rocm/bin\" >> \"$GITHUB_PATH\"\n"
+    - name: Setup Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Set Python bin
+      shell: bash
+      run: 'set -euo pipefail
+
+        PYTHON_BIN="$(command -v python${{ matrix.python-version }})"
+
+        "$PYTHON_BIN" --version
+
+        "$PYTHON_BIN" -m pip --version
+
+        echo "PYTHON_BIN=${PYTHON_BIN}" >> "$GITHUB_ENV"
+
+        '
+    - name: Install dependencies
+      shell: bash
+      run: 'set -eo pipefail
+
+        bash -x dependencies.sh -y
+
+        echo "/usr/local/go/bin" >> "$GITHUB_PATH"
+
+        '
+    - name: Configure project
+      shell: bash
+      run: "set -eo pipefail\nexport PATH=\"/opt/rocm/bin:$PATH\"   # hipify-perl for USE_HIP\nrm -rf build && mkdir build\
+        \ && cd build\ncmake -G Ninja .. \\\n  -DUSE_HIP=ON -DUSE_CUDA=OFF -DWITH_EP=OFF -DWITH_CONDUCTOR=ON \\\n  -DENABLE_MULTI_PROTOCOL=ON\
+        \ \\\n  -DUSE_HTTP=ON -DUSE_ETCD=ON -DSTORE_USE_ETCD=ON \\\n  -DBUILD_UNIT_TESTS=OFF -DENABLE_DEBUG_SYMBOLS=OFF \\\
+        \n  -DCMAKE_BUILD_TYPE=Release \\\n  -DPython3_EXECUTABLE=\"${PYTHON_BIN}\"\n"
+    - name: Build project
+      env:
+        MAX_JOBS: '2'
+      shell: bash
+      run: "set -eo pipefail\nexport PATH=\"/opt/rocm/bin:$PATH\"\ncd build\n# Retry to ride out transient Go module (proxy.golang.org)\
+        \ fetch errors\n# during the etcd-wrapper build; Go caches modules, so retries resume.\nn=0\nuntil cmake --build .\
+        \ -j\"${MAX_JOBS}\"; do\n  n=$((n+1))\n  if [ \"$n\" -ge 3 ]; then echo \"Build failed after $n attempts\"; exit 1;\
+        \ fi\n  echo \"Build attempt $n failed; retrying in 15s...\"; sleep 15\ndone\ncmake --install .\n"
+    - name: Generate Python version tag
+      id: generate_tag_release
+      shell: bash
+      run: echo "python_version_tag=$(echo ${{ matrix.python-version }} | tr -d '.')" >> "$GITHUB_OUTPUT"
+    - name: Build Python wheel
+      shell: bash
+      run: "set -eo pipefail\nexport PATH=\"/opt/rocm/bin:$PATH\"\nexport LD_LIBRARY_PATH=\"${LD_LIBRARY_PATH:-}:/usr/local/lib\"\
+        \nHIP_BUILD=1 PYTHON_VERSION=${{ matrix.python-version }} \\\n  OUTPUT_DIR=dist-rocm-py${{ steps.generate_tag_release.outputs.python_version_tag\
+        \ }} \\\n  ./scripts/build_wheel.sh\n"
+    - name: Assert ROCm package name
+      shell: bash
+      run: "set -eo pipefail\n# Defense in depth: never let a wheel that was not renamed to the ROCm\n# package (e.g. HIP_BUILD\
+        \ silently ignored) reach the publish steps.\ndir=\"mooncake-wheel/dist-rocm-py${{ steps.generate_tag_release.outputs.python_version_tag\
+        \ }}\"\nif ! ls \"${dir}\"/mooncake_transfer_engine_rocm-*.whl >/dev/null 2>&1; then\n  echo \"::error::Built wheel\
+        \ is not named mooncake-transfer-engine-rocm:\"\n  ls -la \"${dir}\" || true\n  exit 1\nfi\n"
+    - name: Smoke test the exact release wheel
+      shell: bash
+      run: "set -eo pipefail\n# Install the actual per-matrix release artifact (cp310-cp313) into a\n# fresh venv and exercise\
+        \ the packaged binary, so packaging/ELF-layout\n# failures in any version are caught before this wheel reaches PyPI.\n\
+        # Import both native bindings as well as exercising the packaged\n# binary. No GPU is needed for these load-time checks.\n\
+        smoke_venv=$(mktemp -d)\n\"${PYTHON_BIN}\" -m venv \"$smoke_venv\"\n\"$smoke_venv/bin/python\" -m pip install --no-deps\
+        \ \\\n  mooncake-wheel/dist-rocm-py${{ steps.generate_tag_release.outputs.python_version_tag }}/*.whl\nexport LD_LIBRARY_PATH=\"\
+        /opt/rocm/lib:/usr/local/lib:${LD_LIBRARY_PATH:-}\"\n\"$smoke_venv/bin/python\" \\\n  .release-ci/scripts/e2e/python/verify_rocm_wheel.py\n\
+        site=\"$(\"$smoke_venv/bin/python\" -c 'import mooncake, os; print(os.path.dirname(mooncake.__file__))')\"\n\"$site/mooncake_master\"\
+        \ --version\n"
+    - name: Upload Python wheel artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: mooncake-wheel-rocm-x86_64-py${{ steps.generate_tag_release.outputs.python_version_tag }}
+        path: mooncake-wheel/dist-rocm-py${{ steps.generate_tag_release.outputs.python_version_tag }}/*.whl
+  musa:
+    runs-on: ubuntu-22.04
+    container: registry.mthreads.com/mcconline/inference/pytorch:2.9.1.post1-py3.10-musa5.2.0-mp31-devel-ubuntu22.04-amd64
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+        - '3.10'
+    env:
+      MUSA_BUILD: '1'
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.sha }}
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Mark repository as safe
+      shell: bash
+      run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+    - name: Setup Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Setup Go
+      uses: actions/setup-go@v6
+      with:
+        go-version: 1.25.9
+        cache: false
+    - name: Set Python bin
+      shell: bash
+      run: 'set -euo pipefail
+
+        PYTHON_BIN="$(command -v python${{ matrix.python-version }})"
+
+        "$PYTHON_BIN" --version
+
+        "$PYTHON_BIN" -m pip --version
+
+        echo "PYTHON_BIN=${PYTHON_BIN}" >> "$GITHUB_ENV"
+
+        '
+    - name: Install dependencies
+      shell: bash
+      run: 'set -eo pipefail
+
+        export PYTHONPATH="${PYTHONPATH:-}"
+
+        export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
+
+        bash -x dependencies.sh -y
+
+        echo "PATH=/usr/local/musa/bin:${PATH}" >> "$GITHUB_ENV"
+
+        echo "LD_LIBRARY_PATH=/usr/local/musa/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+
+        echo "LIBRARY_PATH=/usr/local/musa/lib:${LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+
+        '
+    - name: Verify Go toolchain
+      shell: bash
+      run: "set -euo pipefail\nGO_BIN=\"$(command -v go || true)\"\nif [[ -z \"${GO_BIN}\" ]]; then\n  echo \"::error::Go\
+        \ is not available on PATH\"\n  exit 1\nfi\necho \"Go executable: ${GO_BIN}\"\n\"${GO_BIN}\" version\n"
+    - name: Configure project
+      shell: bash
+      run: "set -eo pipefail\nexport PYTHONPATH=\"${PYTHONPATH:-}\"\nexport CMAKE_PREFIX_PATH=\"${CMAKE_PREFIX_PATH:-}\"\n\
+        rm -rf build\nmkdir build\ncd build\ncmake_args=(\n  -DWITH_CONDUCTOR=ON\n  -DUSE_MUSA=ON\n  -DUSE_HTTP=ON\n  -DUSE_ETCD=ON\n\
+        \  -DSTORE_USE_ETCD=ON\n  -DBUILD_UNIT_TESTS=OFF\n  -DENABLE_DEBUG_SYMBOLS=OFF\n  -DCMAKE_BUILD_TYPE=Release\n  -DPython3_EXECUTABLE=\"\
+        ${PYTHON_BIN}\"\n)\ncmake -G Ninja .. \"${cmake_args[@]}\"\n"
+    - name: Build project
+      shell: bash
+      run: 'set -eo pipefail
+
+        export PYTHONPATH="${PYTHONPATH:-}"
+
+        export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
+
+        cd build
+
+        cmake --build . -j"$(nproc)"
+
+        '
+    - name: Build MUSA allocator
+      shell: bash
+      run: 'set -eo pipefail
+
+        mkdir -p build/mooncake-transfer-engine/nvlink-allocator
+
+        cd mooncake-transfer-engine/nvlink-allocator
+
+        bash build.sh --use-mcc ../../build/mooncake-transfer-engine/nvlink-allocator/
+
+        '
+    - name: Install project
+      shell: bash
+      run: 'set -eo pipefail
+
+        cd build
+
+        cmake --install .
+
+        '
+    - name: Generate Python version tag
+      id: generate_tag_release
+      shell: bash
+      run: 'echo "python_version_tag=$(echo ${{ matrix.python-version }} | tr -d ''.'')" >> $GITHUB_OUTPUT
+
+        '
+    - name: Build Python wheel
+      shell: bash
+      run: 'set -eo pipefail
+
+        export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:/usr/local/lib:/usr/local/musa/lib"
+
+        MUSA_BUILD=1 PYTHON_VERSION=${{ matrix.python-version }} OUTPUT_DIR=dist-musa-py${{ steps.generate_tag_release.outputs.python_version_tag
+        }} ./scripts/build_wheel.sh
+
+        '
+    - name: Upload Python wheel artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: mooncake-wheel-musa-x86_64-py${{ steps.generate_tag_release.outputs.python_version_tag }}
+        path: mooncake-wheel/dist-musa-py${{ steps.generate_tag_release.outputs.python_version_tag }}/*.whl
+  npu:
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+        - '3.12'
+        arch:
+        - x86_64
+        include:
+        - arch: x86_64
+          runner: ubuntu-22.04
+          cann_arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    env:
+      NPU_BUILD: '1'
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.sha }}
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Setup Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Set Python bin
+      shell: bash
+      run: 'set -euo pipefail
+
+        PYTHON_BIN="$(command -v python${{ matrix.python-version }})"
+
+        "$PYTHON_BIN" --version
+
+        "$PYTHON_BIN" -m pip --version
+
+        echo "PYTHON_BIN=${PYTHON_BIN}" >> "$GITHUB_ENV"
+
+        '
+    - name: Install CANN Toolkit
+      shell: bash
+      run: 'set -euo pipefail
+
+        CANN_BASE_URL="https://ascend.devcloud.huaweicloud.com/cann/run/software"
+
+        CANN_VERSION=$(curl -s "${CANN_BASE_URL}/" | grep -oP ''[0-9]+\.[0-9]+\.[0-9]+(?=/)'' | sort -V | tail -1)
+
+        echo "Latest CANN version: ${CANN_VERSION}"
+
+        CANN_URL="${CANN_BASE_URL}/${CANN_VERSION}/${{ matrix.cann_arch }}/Ascend-cann-toolkit_${CANN_VERSION}_linux-${{ matrix.cann_arch
+        }}.run"
+
+        echo "Downloading CANN ${CANN_VERSION} from ${CANN_URL}"
+
+        wget -q --show-progress -O /tmp/cann_toolkit.run "${CANN_URL}"
+
+        chmod +x /tmp/cann_toolkit.run
+
+        sudo /tmp/cann_toolkit.run --install --install-for-all --install-path=/usr/local/Ascend --quiet
+
+        rm -f /tmp/cann_toolkit.run
+
+        '
+    - name: Build and install HIXL
+      shell: bash
+      run: 'set -eo pipefail
+
+        export PYTHONPATH="${PYTHONPATH:-}"
+
+        export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
+
+        source /usr/local/Ascend/cann/set_env.sh
+
+        sudo ${PYTHON_BIN} -m pip install setuptools
+
+        cd /tmp
+
+        git clone https://gitcode.com/cann/hixl.git
+
+        cd hixl
+
+        bash build.sh -j$(nproc)
+
+        sudo ./build_out/cann-hixl_*.run --full --quiet --pylocal --install-path=/usr/local/Ascend
+
+        '
+    - name: Install dependencies
+      shell: bash
+      run: 'set -eo pipefail
+
+        export PYTHONPATH="${PYTHONPATH:-}"
+
+        export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
+
+        source /usr/local/Ascend/cann/set_env.sh
+
+        sudo bash -x dependencies.sh -y
+
+        sudo bash scripts/ascend/dependencies_ascend_installation.sh
+
+        echo "PATH=/usr/local/go/bin:${PATH}" >> "$GITHUB_ENV"
+
+        '
+    - name: Configure project
+      shell: bash
+      run: "set -eo pipefail\nexport PYTHONPATH=\"${PYTHONPATH:-}\"\nexport CMAKE_PREFIX_PATH=\"${CMAKE_PREFIX_PATH:-}\"\n\
+        source /usr/local/Ascend/cann/set_env.sh\nrm -rf build\nmkdir build\ncd build\ncmake_args=(\n  -DWITH_CONDUCTOR=ON\n\
+        \  -DUSE_ASCEND_DIRECT=ON\n  -DUSE_ETCD=ON\n  -DSTORE_USE_ETCD=ON\n  -DBUILD_UNIT_TESTS=OFF\n  -DCMAKE_BUILD_TYPE=Release\n\
+        \  -DPython3_EXECUTABLE=\"${PYTHON_BIN}\"\n  -DCMAKE_INSTALL_RPATH_USE_LINK_PATH=OFF\n  -DCMAKE_BUILD_WITH_INSTALL_RPATH=OFF\n\
+        \  -DCMAKE_SKIP_INSTALL_RPATH=ON\n)\ncmake .. \"${cmake_args[@]}\"\n"
+    - name: Build project
+      shell: bash
+      run: 'set -eo pipefail
+
+        export PYTHONPATH="${PYTHONPATH:-}"
+
+        export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
+
+        source /usr/local/Ascend/cann/set_env.sh
+
+        export PATH="/usr/local/go/bin:${PATH}"
+
+        cd build
+
+        cmake --build . -j"$(nproc)"
+
+        sudo cmake --install .
+
+        '
+    - name: Generate Python version tag
+      id: generate_tag_release
+      shell: bash
+      run: 'echo "python_version_tag=$(echo ${{ matrix.python-version }} | tr -d ''.'')" >> $GITHUB_OUTPUT
+
+        '
+    - name: Build Python wheel
+      shell: bash
+      run: 'set -eo pipefail
+
+        export PYTHONPATH="${PYTHONPATH:-}"
+
+        export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
+
+        source /usr/local/Ascend/cann/set_env.sh
+
+        export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+
+        NPU_BUILD=1 PYTHON_VERSION=${{ matrix.python-version }} OUTPUT_DIR=dist-npu-py${{ steps.generate_tag_release.outputs.python_version_tag
+        }} ./scripts/build_wheel.sh
+
+        '
+    - name: Upload Python wheel artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: mooncake-wheel-npu-${{ matrix.arch }}-py${{ steps.generate_tag_release.outputs.python_version_tag }}
+        path: mooncake-wheel/dist-npu-py${{ steps.generate_tag_release.outputs.python_version_tag }}/*.whl
