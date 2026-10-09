@@ -9,6 +9,10 @@ license = "Apache-2.0"
 name = "mooncake_conductor"
 crate-type = ["rlib"]
 
+[[example]]
+name = "basic_usage"
+path = "examples/basic_usage.rs"
+
 [dependencies]
 thiserror = "2.0"
 

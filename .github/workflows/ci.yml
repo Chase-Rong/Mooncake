@@ -247,6 +247,12 @@ jobs:
         cargo test --manifest-path mooncake-store/rust/Cargo.toml --lib
       shell: bash
 
+    - name: Run Mooncake Conductor Rust smoke test
+      env:
+        MOONCAKE_CONDUCTOR_RUST_LINK_ASAN: "0"
+      run: ./scripts/ci/run_conductor_rust_smoke.sh
+      shell: bash
+
     - name: Start Metadata Server
       uses: ./.github/actions/setup-metadata-server
 
