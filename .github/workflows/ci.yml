@@ -284,6 +284,74 @@ jobs:
         failed-tests-log: build/Testing/Temporary/LastTestsFailed.log
         last-test-log: build/Testing/Temporary/LastTest.log
 
+  conductor-tests-ubuntu24:
+    name: Conductor tests (Ubuntu 24.04, system msgpack)
+    needs: [check-paths]
+    if: *run-ci-for-source-changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        persist-credentials: false
+
+    # Keep the distro's msgpack: Ubuntu 22.04's version does not exercise the
+    # integral-double encoding change covered by these tests on Ubuntu 24.04.
+    - name: Install Conductor dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          build-essential cmake ninja-build libssl-dev libjsoncpp-dev \
+          libgoogle-glog-dev libzmq3-dev libgtest-dev libmsgpack-cxx-dev
+        dpkg-query -W libmsgpack-cxx-dev
+        dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libmsgpack-cxx-dev)" ge 6
+      shell: bash
+
+    - name: Install pinned yalantinglibs headers
+      run: |
+        # Reuse the main build's commit and checksum without configuring the
+        # Store or Transfer Engine. yalantinglibs is a header-only dependency.
+        mkdir -p "$RUNNER_TEMP/conductor-deps"
+        cat > "$RUNNER_TEMP/conductor-deps/CMakeLists.txt" <<'CMAKE'
+        cmake_minimum_required(VERSION 3.16)
+        project(ConductorDependencies LANGUAGES CXX)
+        include("$ENV{GITHUB_WORKSPACE}/mooncake-common/FindYLT.cmake")
+        CMAKE
+        cmake -S "$RUNNER_TEMP/conductor-deps" \
+          -B "$RUNNER_TEMP/conductor-deps/build" -G Ninja \
+          -DYLT_ENABLE_IBV=OFF \
+          -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/conductor-prefix"
+        cmake --install "$RUNNER_TEMP/conductor-deps/build/_deps/yalantinglibs-build"
+      shell: bash
+
+    - name: Build Conductor tests
+      run: |
+        cmake -S mooncake-conductor -B build-conductor -G Ninja \
+          -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/conductor-prefix" \
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+          -DBUILD_UNIT_TESTS=ON
+        cmake --build build-conductor --target conductor_test --parallel 2
+      shell: bash
+
+    - name: Run Conductor tests
+      id: ctest
+      run: |
+        mkdir -p build-conductor/test-results
+        ctest --test-dir build-conductor -R '^conductor_test$' \
+          --output-on-failure --no-tests=error --timeout 300 \
+          --output-junit "$GITHUB_WORKSPACE/build-conductor/test-results/ctest.xml"
+      shell: bash
+
+    - name: Preserve Conductor CTest diagnostics
+      if: ${{ always() && steps.ctest.outcome == 'failure' }}
+      uses: ./.github/actions/ctest-diagnostics
+      with:
+        summary-title: Conductor Ubuntu 24.04 CTest failure
+        artifact-name: ctest-diagnostics-conductor-ubuntu24
+        junit-report: build-conductor/test-results/ctest.xml
+        failed-tests-log: build-conductor/Testing/Temporary/LastTestsFailed.log
+        last-test-log: build-conductor/Testing/Temporary/LastTest.log
+
   build-flags:
     needs: [check-paths]
     if: *run-ci-for-source-changes
@@ -828,6 +896,7 @@ jobs:
       - tone-script-tests
       - build-wheel
       - unit-tests
+      - conductor-tests-ubuntu24
       - build-flags
       - test-wheel-ubuntu
       - build-wheel-cu13
@@ -860,6 +929,7 @@ jobs:
           RESULTS: >-
             ${{ needs.build-wheel.result }}
             ${{ needs.unit-tests.result }}
+            ${{ needs.conductor-tests-ubuntu24.result }}
             ${{ needs.build-flags.result }}
             ${{ needs.test-wheel-ubuntu.result }}
             ${{ needs.build-wheel-cu13.result }}
