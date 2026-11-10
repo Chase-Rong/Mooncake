@@ -151,6 +151,7 @@ June 26, 2026
 :hidden:
 
 getting_started/quick-start
+getting_started/conductor
 getting_started/build
 
 :::

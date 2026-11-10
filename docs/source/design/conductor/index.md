@@ -6,7 +6,9 @@ maintains a global prefix cache table across device, host, and disk tiers, and
 exposes HTTP and RPC APIs for dynamic service registration and cache-hit
 queries.
 
-See the [Rust client API](../../api-reference/rust/conductor.md).
+Start with the [end-to-end Conductor Quick Start](../../getting_started/conductor.md)
+for a vLLM and Router deployment, or see the
+[Rust client API](../../api-reference/rust/conductor.md).
 
 :::{toctree}
 :maxdepth: 1
